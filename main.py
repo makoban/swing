@@ -12,62 +12,111 @@ DB_URL = os.getenv("DB_CONNECTION_STRING")
 TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
+# ==========================================
+# OANDA証券シミュレーション設定
+# ==========================================
+SPREAD_PIPS = 0.4       # スプレッド (pips)
+SPREAD_YEN = 0.004      # スプレッド (円) = 0.4pips
+LEVERAGE = 25           # レバレッジ
+SWAP_LONG = 18          # スワップ (買い/1万通貨/日)
+SWAP_SHORT = -22        # スワップ (売り/1万通貨/日)
+TRADE_UNITS = 50000     # 取引数量 (5万通貨 = 5ロット)
+
 def is_market_open():
     """FX市場が開いているかチェック（月曜7時〜土曜7時 JST）"""
     jst = pytz.timezone('Asia/Tokyo')
     now = datetime.now(jst)
-    weekday = now.weekday()  # 0=月, 1=火, ..., 5=土, 6=日
+    weekday = now.weekday()
     hour = now.hour
 
-    # 日曜日: 完全休み
-    if weekday == 6:
+    if weekday == 6:  # 日曜
         return False
-
-    # 土曜日: 7時以降は休み
-    if weekday == 5 and hour >= 7:
+    if weekday == 5 and hour >= 7:  # 土曜7時以降
         return False
-
-    # 月曜日: 7時より前は休み
-    if weekday == 0 and hour < 7:
+    if weekday == 0 and hour < 7:   # 月曜7時前
         return False
-
     return True
 
 def get_market_data():
     """金利とドル円の現在値・前日比を取得"""
-    # 米国10年債利回り
-    tnx = yf.Ticker(TNX)
-    tnx_hist = tnx.history(period="5d")
-    if len(tnx_hist) < 2:
-        print("⚠️ TNXデータ不足")
+    try:
+        tnx = yf.Ticker(TNX)
+        tnx_hist = tnx.history(period="5d")
+        if len(tnx_hist) < 2:
+            return None, None, None, None
+
+        tnx_current = float(tnx_hist['Close'].iloc[-1])
+        tnx_prev = float(tnx_hist['Close'].iloc[-2])
+        tnx_change = tnx_current - tnx_prev
+
+        if tnx_change >= 0.01:
+            tnx_trend = "UP"
+        elif tnx_change <= -0.01:
+            tnx_trend = "DOWN"
+        else:
+            tnx_trend = "NEUTRAL"
+
+        usdjpy = yf.Ticker(USDJPY)
+        usdjpy_hist = usdjpy.history(period="1d")
+        if len(usdjpy_hist) == 0:
+            return None, None, None, None
+
+        usdjpy_current = float(usdjpy_hist['Close'].iloc[-1])
+
+        print(f"📊 市場データ取得完了")
+        print(f"   TNX: {tnx_current:.2f}% (前日比: {tnx_change:+.2f}%)")
+        print(f"   USD/JPY: {usdjpy_current:.2f}")
+        print(f"   トレンド: {tnx_trend}")
+
+        return tnx_trend, usdjpy_current, tnx_current, tnx_change
+    except Exception as e:
+        print(f"❌ 市場データ取得エラー: {e}")
         return None, None, None, None
 
-    tnx_current = float(tnx_hist['Close'].iloc[-1])
-    tnx_prev = float(tnx_hist['Close'].iloc[-2])
-    tnx_change = tnx_current - tnx_prev
-
-    # 金利トレンド判定 (+0.01以上で上昇、-0.01以下で下落)
-    if tnx_change >= 0.01:
-        tnx_trend = "UP"  # 金利上昇 → ドル高(買い)
-    elif tnx_change <= -0.01:
-        tnx_trend = "DOWN"  # 金利下落 → ドル安(売り)
+def calculate_pnl(direction, entry_price, current_price, units):
+    """損益計算（スプレッド込み）"""
+    if direction == "BUY":
+        # 買いの場合：現在価格 - エントリー価格 - スプレッド
+        pnl = (current_price - entry_price - SPREAD_YEN) * units
     else:
-        tnx_trend = "NEUTRAL"  # 横ばい
+        # 売りの場合：エントリー価格 - 現在価格 - スプレッド
+        pnl = (entry_price - current_price - SPREAD_YEN) * units
+    return pnl
 
-    # ドル円の現在値
-    usdjpy = yf.Ticker(USDJPY)
-    usdjpy_hist = usdjpy.history(period="1d")
-    if len(usdjpy_hist) == 0:
-        print("⚠️ USDJPYデータ不足")
-        return None, None, None, None
+def calculate_swap(direction, units, hours=1):
+    """スワップポイント計算（時間単位）"""
+    daily_swap = SWAP_LONG if direction == "BUY" else SWAP_SHORT
+    # 1万通貨あたりの日次スワップを時間単位に変換
+    hourly_swap = (daily_swap / 24) * (units / 10000)
+    return hourly_swap * hours
 
-    usdjpy_current = float(usdjpy_hist['Close'].iloc[-1])
+def get_current_position(engine):
+    """現在のオープンポジションを取得"""
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, direction, entry_price, units, entry_time, swap_total
+            FROM sim_positions
+            WHERE status = 'OPEN'
+            ORDER BY entry_time DESC
+            LIMIT 1
+        """))
+        return result.fetchone()
 
-    print(f"📊 市場データ取得完了")
-    print(f"   TNX: {tnx_current:.2f}% (前日比: {tnx_change:+.2f}%) → トレンド: {tnx_trend}")
-    print(f"   USD/JPY: {usdjpy_current:.2f}")
+def get_config(engine):
+    """シミュレーション設定を取得"""
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT * FROM sim_config LIMIT 1"))
+        return result.fetchone()
 
-    return tnx_trend, usdjpy_current, tnx_current, tnx_change
+def update_balance(engine, amount):
+    """残高を更新"""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            UPDATE sim_config
+            SET current_balance = current_balance + :amount,
+                updated_at = :time
+        """), {"amount": amount, "time": datetime.now(pytz.UTC)})
+        conn.commit()
 
 def check_and_execute():
     """メインロジック"""
@@ -75,120 +124,217 @@ def check_and_execute():
         print("❌ 環境変数 DB_CONNECTION_STRING が設定されていません")
         return
 
-    # 取引時間チェック
     if not is_market_open():
-        print("💤 市場クローズ中（土日または取引時間外）- 処理スキップ")
+        print("💤 市場クローズ中 - 処理スキップ")
         return
 
-    # DB接続
     engine = create_engine(DB_URL)
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
 
-    print("🚀 FX自動売買システム起動")
-    print(f"⏰ 実行時刻: {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-" * 50)
+    print("=" * 60)
+    print("🚀 FX仮想取引シミュレーション")
+    print(f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S')} JST")
+    print("=" * 60)
 
-    # 1. 市場データの取得
+    # 設定取得
+    config = get_config(engine)
+    if not config:
+        print("❌ sim_config が未設定です")
+        return
+
+    current_balance = float(config[2])  # current_balance
+    print(f"💰 現在残高: ¥{current_balance:,.0f}")
+
+    # 市場データ取得
     trend, usdjpy_price, tnx_value, tnx_change = get_market_data()
     if trend is None:
         print("❌ 市場データ取得失敗")
         return
 
-    # 2. 現在のポジション確認
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT id, direction, entry_price, entry_time
-            FROM positions
-            WHERE status = 'OPEN'
-            ORDER BY entry_time DESC
-            LIMIT 1
-        """))
-        open_position = result.fetchone()
+    # 現在ポジション確認
+    position = get_current_position(engine)
 
-    # 3. 判断ロジック
-    action = None
+    action = "HOLD"
     detail = ""
 
     if trend == "NEUTRAL":
-        # 横ばい時は何もしない
         action = "HOLD"
-        detail = "金利変動が小さいためトレード見送り"
+        detail = "金利変動小 - トレード見送り"
         print(f"⏸️ {detail}")
 
-    elif open_position is None:
-        # Case 1: ポジションなし → 新規エントリー
+    elif position is None:
+        # 新規エントリー
         direction = "BUY" if trend == "UP" else "SELL"
         action = "ENTRY"
-        detail = f"新規{direction}エントリー (金利{trend}トレンド)"
+
+        # スプレッドコスト計算
+        spread_cost = SPREAD_YEN * TRADE_UNITS
 
         with engine.connect() as conn:
             conn.execute(text("""
-                INSERT INTO positions (direction, entry_price, entry_time, status)
-                VALUES (:direction, :price, :time, 'OPEN')
-            """), {"direction": direction, "price": usdjpy_price, "time": datetime.now(pytz.UTC)})
+                INSERT INTO sim_positions
+                (direction, entry_price, current_price, units, entry_time, status, unrealized_pnl, swap_total)
+                VALUES (:direction, :price, :price, :units, :time, 'OPEN', :spread_cost, 0)
+            """), {
+                "direction": direction,
+                "price": usdjpy_price,
+                "units": TRADE_UNITS,
+                "time": datetime.now(pytz.UTC),
+                "spread_cost": -spread_cost  # スプレッドは初期コスト
+            })
             conn.commit()
 
-        print(f"🟢 {detail} @ {usdjpy_price:.2f}")
+        detail = f"新規{direction} {TRADE_UNITS:,}通貨 @ {usdjpy_price:.2f} (スプレッドコスト: ¥{spread_cost:,.0f})"
+        print(f"🟢 {detail}")
 
     else:
-        pos_id, pos_direction, entry_price, entry_time = open_position
+        pos_id, pos_direction, entry_price, units, entry_time, swap_total = position
+        entry_price = float(entry_price)
+        units = int(units)
+        swap_total = float(swap_total) if swap_total else 0
+
         expected_direction = "BUY" if trend == "UP" else "SELL"
 
-        if pos_direction == expected_direction:
-            # Case 2: トレンド継続 → ホールド
-            action = "HOLD"
-            pnl = (usdjpy_price - entry_price) if pos_direction == "BUY" else (entry_price - usdjpy_price)
-            detail = f"ポジション継続中 (P&L: {pnl:+.2f}円)"
+        # スワップポイント加算（毎時）
+        hourly_swap = calculate_swap(pos_direction, units)
+        new_swap_total = swap_total + hourly_swap
 
-            # 含み損益を更新
+        # 含み損益計算
+        unrealized_pnl = calculate_pnl(pos_direction, entry_price, usdjpy_price, units)
+        total_pnl = unrealized_pnl + new_swap_total
+
+        if pos_direction == expected_direction:
+            # ホールド
+            action = "HOLD"
+
             with engine.connect() as conn:
                 conn.execute(text("""
-                    UPDATE positions
-                    SET unrealized_pnl = :pnl, last_check_price = :price, updated_at = :time
+                    UPDATE sim_positions
+                    SET current_price = :price,
+                        unrealized_pnl = :pnl,
+                        swap_total = :swap,
+                        updated_at = :time
                     WHERE id = :id
-                """), {"pnl": pnl, "price": usdjpy_price, "time": datetime.now(pytz.UTC), "id": pos_id})
+                """), {
+                    "price": usdjpy_price,
+                    "pnl": unrealized_pnl,
+                    "swap": new_swap_total,
+                    "time": datetime.now(pytz.UTC),
+                    "id": pos_id
+                })
                 conn.commit()
 
+            detail = f"継続保有 | 含み損益: ¥{unrealized_pnl:+,.0f} | スワップ累計: ¥{new_swap_total:+,.0f}"
             print(f"📌 {detail}")
 
         else:
-            # Case 3: トレンド反転 → 決済 & ドテン
+            # 決済 & ドテン
             action = "REVERSE"
-            pnl = (usdjpy_price - entry_price) if pos_direction == "BUY" else (entry_price - usdjpy_price)
-            detail = f"トレンド反転検出! {pos_direction}決済(P&L:{pnl:+.2f}円) → {expected_direction}新規"
+
+            # 最終損益
+            net_pnl = unrealized_pnl + new_swap_total
+            spread_cost = SPREAD_YEN * units
 
             with engine.connect() as conn:
-                # 既存ポジションを決済
+                # ポジション決済
                 conn.execute(text("""
-                    UPDATE positions
-                    SET status = 'CLOSED', unrealized_pnl = :pnl, last_check_price = :price, updated_at = :time
+                    UPDATE sim_positions
+                    SET status = 'CLOSED',
+                        current_price = :price,
+                        unrealized_pnl = :pnl,
+                        swap_total = :swap,
+                        updated_at = :time
                     WHERE id = :id
-                """), {"pnl": pnl, "price": usdjpy_price, "time": datetime.now(pytz.UTC), "id": pos_id})
+                """), {
+                    "price": usdjpy_price,
+                    "pnl": unrealized_pnl,
+                    "swap": new_swap_total,
+                    "time": datetime.now(pytz.UTC),
+                    "id": pos_id
+                })
 
-                # 新規ポジションを建てる
+                # 取引履歴に記録
                 conn.execute(text("""
-                    INSERT INTO positions (direction, entry_price, entry_time, status)
-                    VALUES (:direction, :price, :time, 'OPEN')
-                """), {"direction": expected_direction, "price": usdjpy_price, "time": datetime.now(pytz.UTC)})
+                    INSERT INTO sim_trade_history
+                    (direction, entry_price, exit_price, units, gross_pnl, spread_cost, swap_total, net_pnl, entry_time, exit_time)
+                    VALUES (:direction, :entry_price, :exit_price, :units, :gross_pnl, :spread_cost, :swap, :net_pnl, :entry_time, :exit_time)
+                """), {
+                    "direction": pos_direction,
+                    "entry_price": entry_price,
+                    "exit_price": usdjpy_price,
+                    "units": units,
+                    "gross_pnl": unrealized_pnl,
+                    "spread_cost": spread_cost,
+                    "swap": new_swap_total,
+                    "net_pnl": net_pnl,
+                    "entry_time": entry_time,
+                    "exit_time": datetime.now(pytz.UTC)
+                })
+
+                # 残高更新
+                conn.execute(text("""
+                    UPDATE sim_config
+                    SET current_balance = current_balance + :pnl,
+                        updated_at = :time
+                """), {"pnl": net_pnl, "time": datetime.now(pytz.UTC)})
+
+                # 新規ポジション
+                new_spread_cost = SPREAD_YEN * TRADE_UNITS
+                conn.execute(text("""
+                    INSERT INTO sim_positions
+                    (direction, entry_price, current_price, units, entry_time, status, unrealized_pnl, swap_total)
+                    VALUES (:direction, :price, :price, :units, :time, 'OPEN', :spread_cost, 0)
+                """), {
+                    "direction": expected_direction,
+                    "price": usdjpy_price,
+                    "units": TRADE_UNITS,
+                    "time": datetime.now(pytz.UTC),
+                    "spread_cost": -new_spread_cost
+                })
+
                 conn.commit()
 
-            print(f"🔄 {detail}")
+            # 残高更新
+            new_balance = current_balance + net_pnl
 
-    # 4. ログ記録
+            detail = f"決済 {pos_direction} P&L: ¥{net_pnl:+,.0f} → 新規 {expected_direction}"
+            print(f"🔄 {detail}")
+            print(f"💰 新残高: ¥{new_balance:,.0f}")
+
+    # 資産推移ログ
     with engine.connect() as conn:
+        # 最新残高取得
+        result = conn.execute(text("SELECT current_balance FROM sim_config LIMIT 1"))
+        row = result.fetchone()
+        balance = float(row[0]) if row else current_balance
+
+        # オープンポジションの含み損益
+        result = conn.execute(text("""
+            SELECT COALESCE(SUM(unrealized_pnl + swap_total), 0)
+            FROM sim_positions WHERE status = 'OPEN'
+        """))
+        row = result.fetchone()
+        total_unrealized = float(row[0]) if row else 0
+
+        equity = balance + total_unrealized
+
         conn.execute(text("""
-            INSERT INTO trade_logs (timestamp, tnx_value, usd_jpy_value, action, detail)
-            VALUES (:time, :tnx, :usdjpy, :action, :detail)
+            INSERT INTO sim_equity_log (timestamp, balance, equity, unrealized_pnl, tnx_value, usdjpy_value)
+            VALUES (:time, :balance, :equity, :unrealized, :tnx, :usdjpy)
         """), {
             "time": datetime.now(pytz.UTC),
+            "balance": balance,
+            "equity": equity,
+            "unrealized": total_unrealized,
             "tnx": tnx_value,
-            "usdjpy": usdjpy_price,
-            "action": action,
-            "detail": detail
+            "usdjpy": usdjpy_price
         })
         conn.commit()
 
-    print("-" * 50)
-    print("✅ 処理完了。ログをDBに記録しました。")
+    print("=" * 60)
+    print(f"📊 有効証拠金: ¥{equity:,.0f}")
+    print("✅ 処理完了")
 
 if __name__ == "__main__":
     check_and_execute()

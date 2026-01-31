@@ -3,3 +3,5 @@ yfinance
 sqlalchemy
 psycopg2-binary
 pytz
+flask
+gunicorn
