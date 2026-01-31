@@ -17,7 +17,7 @@ DB_URL = os.getenv("DB_CONNECTION_STRING")
 TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
-VERSION = "1.1.0"  # 20日MAフィルター追加
+VERSION = "1.2.0"  # ダッシュボードにトレンド表示追加
 
 # ==========================================
 # OANDA Japan シミュレーション設定

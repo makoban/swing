@@ -166,7 +166,7 @@
     <div class="container">
         <div class="header-row">
             <h1>🏄 金利トレンド・サーフィン</h1>
-            <div class="strategy-badge">Interest Rate Trend Surfing Strategy | Ver 1.1.0 (20日MAフィルター)</div>
+            <div class="strategy-badge">Interest Rate Trend Surfing | Ver 1.2.0</div>
         </div>
 
         <div class="grid">
@@ -188,7 +188,12 @@
             <div class="card">
                 <h3>市場情報</h3>
                 <div class="value" id="usdjpy">--</div>
-                <div class="sub">TNX(米10年債): <span id="tnx">--</span>%</div>
+                <div class="sub">TNX: <span id="tnx">--</span>% | 20日MA: <span id="tnxMa20">--</span>%</div>
+            </div>
+            <div class="card">
+                <h3>トレンド</h3>
+                <div class="value" id="trendStatus">--</div>
+                <div class="sub">TNX > 20日MA で上昇トレンド</div>
             </div>
         </div>
 
@@ -363,6 +368,22 @@
                     status.usdjpy_value ? status.usdjpy_value.toFixed(2) + ' 円' : '--';
                 document.getElementById('tnx').textContent =
                     status.tnx_value ? status.tnx_value.toFixed(2) : '--';
+                document.getElementById('tnxMa20').textContent =
+                    status.tnx_ma20 ? status.tnx_ma20.toFixed(2) : '--';
+
+                // トレンド表示
+                const trendEl = document.getElementById('trendStatus');
+                if (status.trend_status === 'UP') {
+                    trendEl.innerHTML = '📈 上昇';
+                    trendEl.className = 'value positive';
+                } else if (status.trend_status === 'DOWN') {
+                    trendEl.innerHTML = '📉 下降';
+                    trendEl.className = 'value negative';
+                } else {
+                    trendEl.textContent = '--';
+                    trendEl.className = 'value';
+                }
+
                 document.getElementById('lastUpdate').textContent = formatDate(status.last_update);
 
                 // ポジション

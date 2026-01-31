@@ -69,6 +69,21 @@ def api_status():
         """))
         latest = result.fetchone()
 
+        # 20日MA計算（過去20件の平均）
+        result = conn.execute(text("""
+            SELECT AVG(tnx_value)
+            FROM (SELECT tnx_value FROM sim_equity_log ORDER BY timestamp DESC LIMIT 20) sub
+        """))
+        ma20_row = result.fetchone()
+        tnx_ma20 = float(ma20_row[0]) if ma20_row and ma20_row[0] else None
+
+        # トレンド判定
+        tnx_value = float(latest[0]) if latest and latest[0] else None
+        if tnx_value and tnx_ma20:
+            trend_status = "UP" if tnx_value > tnx_ma20 else "DOWN"
+        else:
+            trend_status = "UNKNOWN"
+
         return jsonify({
             "initial_capital": initial_capital,
             "balance": balance,
@@ -77,7 +92,9 @@ def api_status():
             "total_profit": total_profit,
             "profit_rate": profit_rate,
             "positions": positions,
-            "tnx_value": float(latest[0]) if latest and latest[0] else None,
+            "tnx_value": tnx_value,
+            "tnx_ma20": tnx_ma20,
+            "trend_status": trend_status,
             "usdjpy_value": float(latest[1]) if latest and latest[1] else None,
             "last_update": latest[2].isoformat() if latest and latest[2] else None
         })
