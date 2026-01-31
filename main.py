@@ -17,7 +17,7 @@ DB_URL = os.getenv("DB_CONNECTION_STRING")
 TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"  # 20日MAフィルター追加
 
 # ==========================================
 # OANDA Japan シミュレーション設定
@@ -85,39 +85,59 @@ def is_market_open():
     return True
 
 def get_market_data():
-    """金利とドル円の現在値・前日比を取得"""
+    """
+    金利とドル円の現在値・前日比を取得
+
+    【Ver 1.1.0 新機能】20日移動平均フィルター
+    - TNX > 20日MA → 上昇トレンド → エントリー可
+    - TNX < 20日MA → 下降トレンド → エントリー禁止
+    """
     try:
         tnx = yf.Ticker(TNX)
-        tnx_hist = tnx.history(period="5d")
-        if len(tnx_hist) < 2:
-            return None, None, None, None
+        tnx_hist = tnx.history(period="30d")  # 20日MA計算のため30日取得
+        if len(tnx_hist) < 21:
+            return None, None, None, None, False
 
         tnx_current = float(tnx_hist['Close'].iloc[-1])
         tnx_prev = float(tnx_hist['Close'].iloc[-2])
         tnx_change = tnx_current - tnx_prev
 
-        # 金利トレンド・サーフィン戦略: 純粋な上昇/下落判定
+        # 20日移動平均を計算
+        ma20 = float(tnx_hist['Close'].rolling(window=20).mean().iloc[-1])
+
+        # トレンドフィルター: TNX > 20日MA
+        trend_ok = tnx_current > ma20
+
+        # 日次シグナル判定
         if tnx_change > 0:
-            tnx_trend = "UP"      # 金利上昇 → BUYシグナル
+            daily_signal = "UP"
         else:
-            tnx_trend = "DOWN"    # 金利下落 → EXITシグナル
+            daily_signal = "DOWN"
 
         usdjpy = yf.Ticker(USDJPY)
         usdjpy_hist = usdjpy.history(period="1d")
         if len(usdjpy_hist) == 0:
-            return None, None, None, None
+            return None, None, None, None, False
 
         usdjpy_current = float(usdjpy_hist['Close'].iloc[-1])
 
         print(f"📊 市場データ取得完了")
         print(f"   TNX: {tnx_current:.2f}% (前日比: {tnx_change:+.3f}%)")
+        print(f"   20日MA: {ma20:.2f}% | トレンド: {'📈 上昇' if trend_ok else '📉 下降'}")
         print(f"   USD/JPY: {usdjpy_current:.2f}")
-        print(f"   シグナル: {'🟢 BUY' if tnx_trend == 'UP' else '🔴 EXIT/WAIT'}")
 
-        return tnx_trend, usdjpy_current, tnx_current, tnx_change
+        # 最終シグナル判定
+        if daily_signal == "UP" and trend_ok:
+            print(f"   シグナル: 🟢 BUY (日次UP + トレンドOK)")
+        elif daily_signal == "UP" and not trend_ok:
+            print(f"   シグナル: ⏸️ WAIT (日次UPだがトレンドNG)")
+        else:
+            print(f"   シグナル: 🔴 EXIT/WAIT")
+
+        return daily_signal, usdjpy_current, tnx_current, tnx_change, trend_ok
     except Exception as e:
         print(f"❌ 市場データ取得エラー: {e}")
-        return None, None, None, None
+        return None, None, None, None, False
 
 def calculate_pnl(entry_price, current_price, units):
     """損益計算（ロングのみ、スプレッド込み）"""
@@ -188,8 +208,8 @@ def check_and_execute():
     print(f"💰 現在残高: ¥{current_balance:,.0f}")
 
     # 市場データ取得
-    trend, usdjpy_price, tnx_value, tnx_change = get_market_data()
-    if trend is None:
+    daily_signal, usdjpy_price, tnx_value, tnx_change, trend_ok = get_market_data()
+    if daily_signal is None:
         print("❌ 市場データ取得失敗")
         return
 
@@ -209,8 +229,9 @@ def check_and_execute():
         # ====================================
         # ポジションなしの場合
         # ====================================
-        if trend == "UP":
-            # 金利上昇 → 新規買い (ENTRY)
+        # 【Ver 1.1.0】20日MAフィルター: 日次UP + トレンドOK の両方が必要
+        if daily_signal == "UP" and trend_ok:
+            # 金利上昇 + 上昇トレンド → 新規買い (ENTRY)
             action = "ENTRY"
 
             # ★ 複利: 現在の残高からロット数を計算
@@ -232,11 +253,16 @@ def check_and_execute():
 
             detail = f"🟢 新規BUY {trade_units:,}通貨 @ {usdjpy_price:.2f}"
             print(detail)
-            print(f"   📊 スプレッドコスト: ¥{spread_cost:,.0f} | 複利ロット計算: 残高×{LOT_RATIO*100:.0f}%")
+            print(f"   📊 スプレッドコスト: ¥{spread_cost:,.0f} | 複利: 残高×{LOT_RATIO*100:.0f}%")
+        elif daily_signal == "UP" and not trend_ok:
+            # 金利上昇だがトレンドNG → 待機
+            action = "WAIT"
+            detail = "⏸️ 日次UP だがトレンドNG (TNX < 20日MA) - エントリー見送り"
+            print(detail)
         else:
             # 金利下落 → 何もしない (WAIT)
             action = "WAIT"
-            detail = "⏸️ 金利下落中 - エントリー待機（嵐が過ぎるのを待つ）"
+            detail = "⏸️ 金利下落中 - エントリー待機"
             print(detail)
     else:
         # ====================================
@@ -255,7 +281,7 @@ def check_and_execute():
         unrealized_pnl = calculate_pnl(entry_price, usdjpy_price, units)
         total_pnl = unrealized_pnl + new_swap_total
 
-        if trend == "UP":
+        if daily_signal == "UP":
             # 金利上昇継続 → 持ち続ける (HOLD)
             action = "HOLD"
 
