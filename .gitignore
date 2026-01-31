@@ -1,0 +1,9 @@
+# 不要ファイル
+*.pyc
+__pycache__/
+.env
+*.log
+
+# エディタ
+.vscode/
+.idea/
