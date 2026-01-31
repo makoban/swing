@@ -13,47 +13,40 @@ TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
 # ==========================================
-# OANDA証券シミュレーション設定
+# OANDA Japan シミュレーション設定
 # ==========================================
-SPREAD_PIPS = 0.4       # スプレッド (pips)
-SPREAD_YEN = 0.004      # スプレッド (円) = 0.4pips
-LEVERAGE = 25           # レバレッジ
-SWAP_LONG = 18          # スワップ (買い/1万通貨/日)
+# 予算: 100万円
+# レバレッジ: 25倍
+# ポジション: 60,000通貨（6ロット）固定
+# 暴落耐性: -10円でもロスカットされない設計
+# ==========================================
+INITIAL_CAPITAL = 1_000_000  # 初期資金: 100万円
+TRADE_UNITS = 60_000         # 取引数量: 60,000通貨 (6ロット)
+SPREAD_PIPS = 0.4            # スプレッド: 0.4pips (原則固定)
+SPREAD_YEN = 0.004           # スプレッド (円換算)
+LEVERAGE = 25                # レバレッジ: 25倍
+SWAP_LONG = 100              # スワップ: +100円/1万通貨/日 (金利差4%想定)
 
 # ==========================================
-# リスク管理設定（安全なポジションサイズ計算）
+# リスク検証
 # ==========================================
-MAX_RISK_PERCENT = 10   # 最大リスク: 資金の10%
-MAX_ADVERSE_MOVE = 3.0  # 想定最大逆行: 3円（300pips）
-MIN_UNITS = 10000       # 最小取引単位: 1万通貨
-UNIT_STEP = 10000       # 取引単位の刻み: 1万通貨
+# 必要証拠金: 154円 × 60,000 ÷ 25 = 369,600円
+# -10円暴落時の含み損: -10円 × 60,000 = -600,000円
+# 残高: 1,000,000 - 600,000 = 400,000円
+# 判定: 400,000 > 369,600 → ロスカットなし (維持率108%)
+# ==========================================
 
 # ==========================================
-# 金利トレンド・サーフィン戦略
+# 金利トレンド・サーフィン戦略 (ロング専用版)
 # Interest Rate Trend Surfing Strategy
 # バックテスト: ROI 625,260% (30年), 勝率58.26%
 # ==========================================
-# ルール:
-# 1. TNX（米国10年債）が前日比で上昇 → 買い（ロング）
-# 2. TNX が前日比で下落 → 決済（ポジション解消）
-# 3. ショート（売り）は行わない（ロングオンリー）
-# 4. トレンドが続く限り保有し続ける（スイングトレード）
-
-def calculate_safe_position_size(balance, usdjpy_price):
-    """
-    安全なポジションサイズを計算（複利対応）
-    """
-    max_loss = balance * (MAX_RISK_PERCENT / 100)
-    safe_units = max_loss / MAX_ADVERSE_MOVE
-    safe_units = int(safe_units // UNIT_STEP) * UNIT_STEP
-    safe_units = max(safe_units, MIN_UNITS)
-
-    required_margin = (safe_units * usdjpy_price) / LEVERAGE
-    if required_margin > balance * 0.8:
-        safe_units = int((balance * 0.8 * LEVERAGE / usdjpy_price) // UNIT_STEP) * UNIT_STEP
-        safe_units = max(safe_units, MIN_UNITS)
-
-    return int(safe_units)
+# アクション表:
+# 持ってない + 金利上昇 → 新規買い (ENTRY)
+# 持ってない + 金利下落 → 何もしない (WAIT)
+# 持っている + 金利上昇 → 持ち続ける (HOLD)
+# 持っている + 金利下落 → 全決済 (EXIT)
+# ==========================================
 
 def is_market_open():
     """FX市場が開いているかチェック（月曜7時〜土曜7時 JST）"""
@@ -82,11 +75,11 @@ def get_market_data():
         tnx_prev = float(tnx_hist['Close'].iloc[-2])
         tnx_change = tnx_current - tnx_prev
 
-        # 金利トレンド・サーフィン戦略: 閾値なし、純粋な上昇/下落判定
+        # 金利トレンド・サーフィン戦略: 純粋な上昇/下落判定
         if tnx_change > 0:
-            tnx_trend = "UP"      # 金利上昇 → 買いシグナル
+            tnx_trend = "UP"      # 金利上昇 → BUYシグナル
         else:
-            tnx_trend = "DOWN"    # 金利下落 → 決済シグナル
+            tnx_trend = "DOWN"    # 金利下落 → EXITシグナル
 
         usdjpy = yf.Ticker(USDJPY)
         usdjpy_hist = usdjpy.history(period="1d")
@@ -98,7 +91,7 @@ def get_market_data():
         print(f"📊 市場データ取得完了")
         print(f"   TNX: {tnx_current:.2f}% (前日比: {tnx_change:+.3f}%)")
         print(f"   USD/JPY: {usdjpy_current:.2f}")
-        print(f"   シグナル: {'🟢 BUY' if tnx_trend == 'UP' else '🔴 EXIT'}")
+        print(f"   シグナル: {'🟢 BUY' if tnx_trend == 'UP' else '🔴 EXIT/WAIT'}")
 
         return tnx_trend, usdjpy_current, tnx_current, tnx_change
     except Exception as e:
@@ -111,7 +104,11 @@ def calculate_pnl(entry_price, current_price, units):
     return pnl
 
 def calculate_swap(units, hours=1):
-    """スワップポイント計算（ロングのみ）"""
+    """スワップポイント計算（ロングのみ）
+
+    OANDA Japan: +100円/1万通貨/日
+    時間単位に変換: 100円 ÷ 24時間 = 約4.17円/時間/1万通貨
+    """
     hourly_swap = (SWAP_LONG / 24) * (units / 10000)
     return hourly_swap * hours
 
@@ -135,10 +132,13 @@ def get_config(engine):
 
 def check_and_execute():
     """
-    金利トレンド・サーフィン戦略 メインロジック
+    金利トレンド・サーフィン戦略 メインロジック (ロング専用版)
 
-    - TNX上昇 → 買い（新規）またはホールド
-    - TNX下落 → 決済（ショートはしない）
+    アクション表:
+    - 持ってない + 金利上昇 → 新規買い (ENTRY)
+    - 持ってない + 金利下落 → 何もしない (WAIT)
+    - 持っている + 金利上昇 → 持ち続ける (HOLD)
+    - 持っている + 金利下落 → 全決済 (EXIT)
     """
     if not DB_URL:
         print("❌ 環境変数 DB_CONNECTION_STRING が設定されていません")
@@ -153,7 +153,7 @@ def check_and_execute():
     now = datetime.now(jst)
 
     print("=" * 60)
-    print("🏄 金利トレンド・サーフィン戦略")
+    print("🏄 金利トレンド・サーフィン戦略 (ロング専用)")
     print(f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S')} JST")
     print("=" * 60)
 
@@ -172,6 +172,11 @@ def check_and_execute():
         print("❌ 市場データ取得失敗")
         return
 
+    # 必要証拠金チェック
+    required_margin = (TRADE_UNITS * usdjpy_price) / LEVERAGE
+    margin_rate = (current_balance / required_margin) * 100
+    print(f"📋 必要証拠金: ¥{required_margin:,.0f} (維持率: {margin_rate:.1f}%)")
+
     # 現在ポジション確認
     position = get_current_position(engine)
 
@@ -179,12 +184,13 @@ def check_and_execute():
     detail = ""
 
     if position is None:
-        # ポジションなし
+        # ====================================
+        # ポジションなしの場合
+        # ====================================
         if trend == "UP":
-            # 金利上昇 → 新規買い
+            # 金利上昇 → 新規買い (ENTRY)
             action = "ENTRY"
-            trade_units = calculate_safe_position_size(current_balance, usdjpy_price)
-            spread_cost = SPREAD_YEN * trade_units
+            spread_cost = SPREAD_YEN * TRADE_UNITS
 
             with engine.connect() as conn:
                 conn.execute(text("""
@@ -193,23 +199,24 @@ def check_and_execute():
                     VALUES ('BUY', :price, :price, :units, :time, 'OPEN', :spread_cost, 0)
                 """), {
                     "price": usdjpy_price,
-                    "units": trade_units,
+                    "units": TRADE_UNITS,
                     "time": datetime.now(pytz.UTC),
                     "spread_cost": -spread_cost
                 })
                 conn.commit()
 
-            max_loss = trade_units * MAX_ADVERSE_MOVE
-            detail = f"🟢 新規BUY {trade_units:,}通貨 @ {usdjpy_price:.2f}"
+            detail = f"🟢 新規BUY {TRADE_UNITS:,}通貨 @ {usdjpy_price:.2f}"
             print(detail)
-            print(f"   📊 最大リスク(3円逆行時): ¥{max_loss:,.0f}")
+            print(f"   📊 スプレッドコスト: ¥{spread_cost:,.0f}")
         else:
-            # 金利下落だがポジションなし → 待機
+            # 金利下落 → 何もしない (WAIT)
             action = "WAIT"
-            detail = "⏸️ 金利下落中 - エントリー待機（ロングオンリー戦略）"
+            detail = "⏸️ 金利下落中 - エントリー待機（嵐が過ぎるのを待つ）"
             print(detail)
     else:
-        # ポジションあり
+        # ====================================
+        # ポジション保有中の場合
+        # ====================================
         pos_id, pos_direction, entry_price, units, entry_time, swap_total = position
         entry_price = float(entry_price)
         units = int(units)
@@ -224,7 +231,7 @@ def check_and_execute():
         total_pnl = unrealized_pnl + new_swap_total
 
         if trend == "UP":
-            # 金利上昇継続 → ホールド
+            # 金利上昇継続 → 持ち続ける (HOLD)
             action = "HOLD"
 
             with engine.connect() as conn:
@@ -248,7 +255,7 @@ def check_and_execute():
             print(detail)
 
         else:
-            # 金利下落 → 決済（ショートはしない）
+            # 金利下落 → 全決済 (EXIT)
             action = "EXIT"
             net_pnl = unrealized_pnl + new_swap_total
             spread_cost = SPREAD_YEN * units
@@ -299,9 +306,10 @@ def check_and_execute():
 
             new_balance = current_balance + net_pnl
             result_emoji = "✅" if net_pnl > 0 else "❌"
-            detail = f"🔴 決済 BUY @ {usdjpy_price:.2f} | P&L: ¥{net_pnl:+,.0f} {result_emoji}"
+            detail = f"🔴 全決済 @ {usdjpy_price:.2f} | P&L: ¥{net_pnl:+,.0f} {result_emoji}"
             print(detail)
             print(f"💰 新残高: ¥{new_balance:,.0f}")
+            print("   📝 現金で休んで次のチャンスを待つ")
 
     # 資産推移ログ
     with engine.connect() as conn:
