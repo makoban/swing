@@ -12,6 +12,27 @@ DB_URL = os.getenv("DB_CONNECTION_STRING")
 TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
+def is_market_open():
+    """FX市場が開いているかチェック（月曜7時〜土曜7時 JST）"""
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    weekday = now.weekday()  # 0=月, 1=火, ..., 5=土, 6=日
+    hour = now.hour
+
+    # 日曜日: 完全休み
+    if weekday == 6:
+        return False
+
+    # 土曜日: 7時以降は休み
+    if weekday == 5 and hour >= 7:
+        return False
+
+    # 月曜日: 7時より前は休み
+    if weekday == 0 and hour < 7:
+        return False
+
+    return True
+
 def get_market_data():
     """金利とドル円の現在値・前日比を取得"""
     # 米国10年債利回り
@@ -52,6 +73,11 @@ def check_and_execute():
     """メインロジック"""
     if not DB_URL:
         print("❌ 環境変数 DB_CONNECTION_STRING が設定されていません")
+        return
+
+    # 取引時間チェック
+    if not is_market_open():
+        print("💤 市場クローズ中（土日または取引時間外）- 処理スキップ")
         return
 
     # DB接続
