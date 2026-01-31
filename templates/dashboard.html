@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FX仮想取引ダッシュボード</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -56,6 +57,30 @@
             margin: 30px 0 15px;
             padding-bottom: 10px;
             border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .chart-container {
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .chart-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .chart-card h3 {
+            color: #00d4ff;
+            font-size: 1rem;
+            margin-bottom: 15px;
         }
 
         table {
@@ -111,16 +136,38 @@
             margin-top: 30px;
         }
 
+        .strategy-badge {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 10px 20px;
+            background: rgba(0,212,255,0.1);
+            border-radius: 30px;
+            display: inline-block;
+            font-size: 0.9rem;
+            color: #00d4ff;
+        }
+        .header-row {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            margin-bottom: 30px;
+        }
+
         @media (max-width: 600px) {
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .card .value { font-size: 1.5rem; }
             th, td { padding: 10px 8px; font-size: 0.85rem; }
+            .chart-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>💹 FX仮想取引ダッシュボード</h1>
+        <div class="header-row">
+            <h1>🏄 金利トレンド・サーフィン</h1>
+            <div class="strategy-badge">Interest Rate Trend Surfing Strategy</div>
+        </div>
 
         <div class="grid">
             <div class="card">
@@ -142,6 +189,26 @@
                 <h3>市場情報</h3>
                 <div class="value" id="usdjpy">--</div>
                 <div class="sub">TNX(米10年債): <span id="tnx">--</span>%</div>
+            </div>
+        </div>
+
+        <h2 class="section-title">📈 チャート</h2>
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3>💰 資産推移（Equity Curve）</h3>
+                <canvas id="equityChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>💹 USD/JPY 価格推移</h3>
+                <canvas id="usdjpyChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>📊 TNX（米10年債利回り）</h3>
+                <canvas id="tnxChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>📉 損益推移</h3>
+                <canvas id="pnlChart"></canvas>
             </div>
         </div>
 
@@ -199,9 +266,59 @@
     </div>
 
     <script>
+        // Chart instances
+        let equityChart, usdjpyChart, tnxChart, pnlChart;
+
+        const chartOptions = {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(255,255,255,0.05)' },
+                    ticks: { color: '#888', maxTicksLimit: 6 }
+                },
+                y: {
+                    grid: { color: 'rgba(255,255,255,0.05)' },
+                    ticks: { color: '#888' }
+                }
+            }
+        };
+
+        function initCharts() {
+            const ctx1 = document.getElementById('equityChart').getContext('2d');
+            equityChart = new Chart(ctx1, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.1)', fill: true, tension: 0.3 }] },
+                options: chartOptions
+            });
+
+            const ctx2 = document.getElementById('usdjpyChart').getContext('2d');
+            usdjpyChart = new Chart(ctx2, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.1)', fill: true, tension: 0.3 }] },
+                options: chartOptions
+            });
+
+            const ctx3 = document.getElementById('tnxChart').getContext('2d');
+            tnxChart = new Chart(ctx3, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#ffa502', backgroundColor: 'rgba(255,165,2,0.1)', fill: true, tension: 0.3 }] },
+                options: chartOptions
+            });
+
+            const ctx4 = document.getElementById('pnlChart').getContext('2d');
+            pnlChart = new Chart(ctx4, {
+                type: 'bar',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+                options: chartOptions
+            });
+        }
+
         function formatCurrency(val) {
             if (val === null || val === undefined) return '--';
-            const prefix = val >= 0 ? '' : '';
             return '¥' + Math.round(val).toLocaleString();
         }
 
@@ -219,6 +336,12 @@
                 month: '2-digit', day: '2-digit',
                 hour: '2-digit', minute: '2-digit'
             });
+        }
+
+        function formatShortDate(isoStr) {
+            if (!isoStr) return '';
+            const d = new Date(isoStr);
+            return d.toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit' });
         }
 
         async function loadData() {
@@ -275,11 +398,50 @@
                 `).join('') : '<tr><td colspan="6" style="text-align:center;color:#666">取引履歴なし</td></tr>';
                 document.getElementById('history').innerHTML = histHtml;
 
+                // チャートデータ
+                const equity = await fetch('/api/equity').then(r => r.json());
+                updateCharts(equity.equity_history, hist.history);
+
             } catch (e) {
                 console.error('Error loading data:', e);
             }
         }
 
+        function updateCharts(equityData, tradeHistory) {
+            if (!equityData || equityData.length === 0) return;
+
+            const labels = equityData.map(d => formatShortDate(d.timestamp));
+
+            // Equity Chart
+            equityChart.data.labels = labels;
+            equityChart.data.datasets[0].data = equityData.map(d => d.equity);
+            equityChart.update();
+
+            // USD/JPY Chart
+            usdjpyChart.data.labels = labels;
+            usdjpyChart.data.datasets[0].data = equityData.map(d => d.usdjpy_value);
+            usdjpyChart.update();
+
+            // TNX Chart
+            tnxChart.data.labels = labels;
+            tnxChart.data.datasets[0].data = equityData.map(d => d.tnx_value);
+            tnxChart.update();
+
+            // P&L Chart (from trade history)
+            if (tradeHistory && tradeHistory.length > 0) {
+                const pnlLabels = tradeHistory.slice(0, 20).reverse().map(t => formatShortDate(t.exit_time));
+                const pnlData = tradeHistory.slice(0, 20).reverse().map(t => t.net_pnl);
+                const pnlColors = pnlData.map(v => v >= 0 ? 'rgba(0,255,136,0.7)' : 'rgba(255,71,87,0.7)');
+
+                pnlChart.data.labels = pnlLabels;
+                pnlChart.data.datasets[0].data = pnlData;
+                pnlChart.data.datasets[0].backgroundColor = pnlColors;
+                pnlChart.update();
+            }
+        }
+
+        // Initialize
+        initCharts();
         loadData();
         setInterval(loadData, 60000); // 1分ごとに更新
     </script>
