@@ -20,7 +20,45 @@ SPREAD_YEN = 0.004      # スプレッド (円) = 0.4pips
 LEVERAGE = 25           # レバレッジ
 SWAP_LONG = 18          # スワップ (買い/1万通貨/日)
 SWAP_SHORT = -22        # スワップ (売り/1万通貨/日)
-TRADE_UNITS = 50000     # 取引数量 (5万通貨 = 5ロット)
+
+# ==========================================
+# リスク管理設定（安全なポジションサイズ計算）
+# ==========================================
+MAX_RISK_PERCENT = 10   # 最大リスク: 資金の10%
+MAX_ADVERSE_MOVE = 3.0  # 想定最大逆行: 3円（300pips）
+MIN_UNITS = 10000       # 最小取引単位: 1万通貨
+UNIT_STEP = 10000       # 取引単位の刻み: 1万通貨
+
+def calculate_safe_position_size(balance, usdjpy_price):
+    """
+    安全なポジションサイズを計算（複利対応）
+
+    ルール:
+    1. 最大損失を資金の10%に制限
+    2. 価格が3円逆行してもロスカットにならないサイズ
+    3. 1万通貨単位で丸める
+    """
+    # 最大許容損失額
+    max_loss = balance * (MAX_RISK_PERCENT / 100)
+
+    # 3円の逆行に耐えられる通貨数
+    # 損失 = 逆行幅(円) × 通貨数
+    # 通貨数 = 最大許容損失 / 逆行幅
+    safe_units = max_loss / MAX_ADVERSE_MOVE
+
+    # 1万通貨単位に丸める（切り捨て）
+    safe_units = int(safe_units // UNIT_STEP) * UNIT_STEP
+
+    # 最小単位を保証
+    safe_units = max(safe_units, MIN_UNITS)
+
+    # レバレッジ制限チェック
+    required_margin = (safe_units * usdjpy_price) / LEVERAGE
+    if required_margin > balance * 0.8:  # 証拠金使用率80%上限
+        safe_units = int((balance * 0.8 * LEVERAGE / usdjpy_price) // UNIT_STEP) * UNIT_STEP
+        safe_units = max(safe_units, MIN_UNITS)
+
+    return int(safe_units)
 
 def is_market_open():
     """FX市場が開いているかチェック（月曜7時〜土曜7時 JST）"""
@@ -168,8 +206,11 @@ def check_and_execute():
         direction = "BUY" if trend == "UP" else "SELL"
         action = "ENTRY"
 
+        # 安全なポジションサイズを計算（複利対応）
+        trade_units = calculate_safe_position_size(current_balance, usdjpy_price)
+
         # スプレッドコスト計算
-        spread_cost = SPREAD_YEN * TRADE_UNITS
+        spread_cost = SPREAD_YEN * trade_units
 
         with engine.connect() as conn:
             conn.execute(text("""
@@ -179,14 +220,17 @@ def check_and_execute():
             """), {
                 "direction": direction,
                 "price": usdjpy_price,
-                "units": TRADE_UNITS,
+                "units": trade_units,
                 "time": datetime.now(pytz.UTC),
                 "spread_cost": -spread_cost  # スプレッドは初期コスト
             })
             conn.commit()
 
-        detail = f"新規{direction} {TRADE_UNITS:,}通貨 @ {usdjpy_price:.2f} (スプレッドコスト: ¥{spread_cost:,.0f})"
+        # リスク情報を表示
+        max_loss = trade_units * MAX_ADVERSE_MOVE
+        detail = f"新規{direction} {trade_units:,}通貨 @ {usdjpy_price:.2f}"
         print(f"🟢 {detail}")
+        print(f"   📊 最大リスク(3円逆行時): ¥{max_loss:,.0f} | スプレッドコスト: ¥{spread_cost:,.0f}")
 
     else:
         pos_id, pos_direction, entry_price, units, entry_time, swap_total = position
@@ -279,8 +323,10 @@ def check_and_execute():
                         updated_at = :time
                 """), {"pnl": net_pnl, "time": datetime.now(pytz.UTC)})
 
-                # 新規ポジション
-                new_spread_cost = SPREAD_YEN * TRADE_UNITS
+                # 新規ポジション（残高更新後の値で計算）
+                new_balance = current_balance + net_pnl
+                new_trade_units = calculate_safe_position_size(new_balance, usdjpy_price)
+                new_spread_cost = SPREAD_YEN * new_trade_units
                 conn.execute(text("""
                     INSERT INTO sim_positions
                     (direction, entry_price, current_price, units, entry_time, status, unrealized_pnl, swap_total)
@@ -288,17 +334,14 @@ def check_and_execute():
                 """), {
                     "direction": expected_direction,
                     "price": usdjpy_price,
-                    "units": TRADE_UNITS,
+                    "units": new_trade_units,
                     "time": datetime.now(pytz.UTC),
                     "spread_cost": -new_spread_cost
                 })
 
                 conn.commit()
 
-            # 残高更新
-            new_balance = current_balance + net_pnl
-
-            detail = f"決済 {pos_direction} P&L: ¥{net_pnl:+,.0f} → 新規 {expected_direction}"
+            detail = f"決済 {pos_direction} P&L: ¥{net_pnl:+,.0f} → 新規 {expected_direction} {new_trade_units:,}通貨"
             print(f"🔄 {detail}")
             print(f"💰 新残高: ¥{new_balance:,.0f}")
 
