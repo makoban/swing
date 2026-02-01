@@ -17,7 +17,7 @@ DB_URL = os.getenv("DB_CONNECTION_STRING")
 TNX = "^TNX"      # 米国10年債利回り
 USDJPY = "JPY=X"  # ドル円
 
-VERSION = "1.2.0"  # ダッシュボードにトレンド表示追加
+VERSION = "1.3.0"  # WAIT戦略 + デイトレ戦略統合バッチ
 
 # ==========================================
 # OANDA Japan シミュレーション設定
@@ -392,7 +392,247 @@ def check_and_execute():
 
     print("=" * 60)
     print(f"📊 有効証拠金: ¥{equity:,.0f}")
-    print("✅ 処理完了")
+    print("✅ WAIT戦略 処理完了")
+
+# ==========================================
+# ⚡ デイトレ戦略 (10:00-18:00 JST)
+# Ver 1.3.0 新機能
+# ==========================================
+# 設定:
+# - 利確: +0.15円
+# - 損切: -0.20円
+# - LOT: 残高の15%（複利）
+# - 強制決済: 18:00 JST
+# ==========================================
+
+DAYTRADE_TP = 0.15      # 利確: +0.15円
+DAYTRADE_SL = 0.20      # 損切: -0.20円
+DAYTRADE_LOT_RATIO = 0.15  # 複利: 残高の15%
+DAYTRADE_START_HOUR = 10   # 取引開始: 10:00 JST
+DAYTRADE_END_HOUR = 18     # 取引終了/強制決済: 18:00 JST
+
+def calculate_daytrade_lot(balance):
+    """デイトレ用ロット計算（15%）"""
+    raw_lot = balance * DAYTRADE_LOT_RATIO
+    lot = int(raw_lot // 10000) * 10000
+    return max(lot, 10000)
+
+def is_daytrade_hours():
+    """デイトレ取引時間内かチェック（10:00-18:00 JST）"""
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    return DAYTRADE_START_HOUR <= now.hour < DAYTRADE_END_HOUR
+
+def is_force_close_time():
+    """強制決済時刻かチェック（18:00 JST以降）"""
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    return now.hour >= DAYTRADE_END_HOUR
+
+def get_daytrade_trend(usdjpy_price, engine):
+    """デイトレ用トレンド判定（5時間の価格変動）"""
+    try:
+        usdjpy = yf.Ticker(USDJPY)
+        hist = usdjpy.history(period="1d", interval="1h")
+        if len(hist) < 6:
+            return None
+
+        current = float(hist['Close'].iloc[-1])
+        past = float(hist['Close'].iloc[-6])
+
+        return "UP" if current > past + 0.02 else "DOWN"
+    except:
+        return None
+
+def check_daytrade():
+    """
+    デイトレ戦略 メインロジック
+
+    - 10:00-18:00 JST のみ取引
+    - 利確: +0.15円、損切: -0.20円
+    - 18:00 に強制決済
+    """
+    if not DB_URL:
+        return
+
+    if not is_market_open():
+        return
+
+    engine = create_engine(DB_URL)
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+
+    print()
+    print("=" * 60)
+    print("⚡ デイトレ戦略 (Day Trade)")
+    print(f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S')} JST")
+    print("=" * 60)
+
+    # 設定取得
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT initial_capital, current_balance, take_profit, stop_loss
+            FROM sim_daytrade_config LIMIT 1
+        """))
+        config = result.fetchone()
+
+        if not config:
+            print("⚠️ デイトレ設定なし - スキップ")
+            return
+
+        initial_capital = float(config[0])
+        current_balance = float(config[1])
+
+        # ポジション確認
+        result = conn.execute(text("""
+            SELECT id, entry_price, units, unrealized_pnl
+            FROM sim_daytrade_positions
+            WHERE status = 'OPEN'
+            ORDER BY entry_time DESC LIMIT 1
+        """))
+        position = result.fetchone()
+
+    # 現在価格取得
+    try:
+        usdjpy = yf.Ticker(USDJPY)
+        usdjpy_hist = usdjpy.history(period="1d")
+        usdjpy_price = float(usdjpy_hist['Close'].iloc[-1])
+    except:
+        print("❌ 価格取得エラー")
+        return
+
+    print(f"💰 残高: ¥{current_balance:,.0f}")
+    print(f"💹 USD/JPY: {usdjpy_price:.2f}")
+
+    # ポジションなしの場合
+    if position is None:
+        if not is_daytrade_hours():
+            print(f"⏰ 取引時間外 ({DAYTRADE_START_HOUR}:00-{DAYTRADE_END_HOUR}:00 JST)")
+            return
+
+        trend = get_daytrade_trend(usdjpy_price, engine)
+        print(f"📈 トレンド: {trend}")
+
+        if trend == "UP":
+            # 新規エントリー
+            trade_units = calculate_daytrade_lot(current_balance)
+            entry_price = usdjpy_price + SPREAD_YEN
+
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    INSERT INTO sim_daytrade_positions
+                    (direction, entry_price, current_price, units, entry_time, status, unrealized_pnl)
+                    VALUES ('BUY', :price, :price, :units, :time, 'OPEN', :spread)
+                """), {
+                    "price": entry_price,
+                    "units": trade_units,
+                    "time": datetime.now(pytz.UTC),
+                    "spread": -SPREAD_YEN * trade_units
+                })
+                conn.commit()
+
+            print(f"🟢 ENTRY: BUY {trade_units:,} @ {entry_price:.2f}")
+            print(f"   利確: {entry_price + DAYTRADE_TP:.2f} | 損切: {entry_price - DAYTRADE_SL:.2f}")
+        else:
+            print("⏸️ WAIT - トレンドDOWN")
+
+    # ポジションありの場合
+    else:
+        pos_id = position[0]
+        entry_price = float(position[1])
+        units = int(position[2])
+
+        pnl = usdjpy_price - entry_price
+        pnl_jpy = pnl * units
+
+        print(f"📍 ポジション: {units:,} @ {entry_price:.2f}")
+        print(f"   現在損益: ¥{pnl_jpy:+,.0f}")
+
+        action = None
+        action_reason = ""
+
+        # 強制決済チェック
+        if is_force_close_time():
+            action = "FORCE_CLOSE"
+            action_reason = "18:00 強制決済"
+        # 利確チェック
+        elif pnl >= DAYTRADE_TP:
+            action = "TAKE_PROFIT"
+            action_reason = f"利確 +{pnl:.3f}円"
+        # 損切チェック
+        elif pnl <= -DAYTRADE_SL:
+            action = "STOP_LOSS"
+            action_reason = f"損切 {pnl:.3f}円"
+
+        if action:
+            new_balance = current_balance + pnl_jpy
+
+            with engine.connect() as conn:
+                # ポジションクローズ
+                conn.execute(text("""
+                    UPDATE sim_daytrade_positions
+                    SET status = 'CLOSED', current_price = :price, unrealized_pnl = :pnl
+                    WHERE id = :id
+                """), {"price": usdjpy_price, "pnl": pnl_jpy, "id": pos_id})
+
+                # 残高更新
+                conn.execute(text("""
+                    UPDATE sim_daytrade_config SET current_balance = :balance
+                """), {"balance": new_balance})
+
+                # 履歴記録
+                conn.execute(text("""
+                    INSERT INTO sim_daytrade_history
+                    (direction, entry_price, exit_price, units, pnl, action, exit_time)
+                    VALUES ('BUY', :entry, :exit, :units, :pnl, :action, :time)
+                """), {
+                    "entry": entry_price,
+                    "exit": usdjpy_price,
+                    "units": units,
+                    "pnl": pnl_jpy,
+                    "action": action,
+                    "time": datetime.now(pytz.UTC)
+                })
+
+                conn.commit()
+
+            emoji = "✅" if pnl_jpy > 0 else "❌"
+            print(f"{emoji} {action_reason} | P&L: ¥{pnl_jpy:+,.0f}")
+            print(f"💰 新残高: ¥{new_balance:,.0f}")
+        else:
+            # ポジション更新
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    UPDATE sim_daytrade_positions
+                    SET current_price = :price, unrealized_pnl = :pnl, updated_at = :time
+                    WHERE id = :id
+                """), {"price": usdjpy_price, "pnl": pnl_jpy, "id": pos_id, "time": datetime.now(pytz.UTC)})
+                conn.commit()
+
+            print("📊 HOLD - 継続保有")
+
+    print("✅ デイトレ戦略 処理完了")
+
+def main():
+    """
+    統合バッチ処理
+    - WAIT戦略: 常時実行
+    - デイトレ戦略: 常時実行（取引は10-18時のみ）
+    """
+    print()
+    print("🚀 FX Trading Bot v1.3.0")
+    print("=" * 60)
+
+    # WAIT戦略
+    check_and_execute()
+
+    # デイトレ戦略
+    check_daytrade()
+
+    print()
+    print("=" * 60)
+    print("🏁 全処理完了")
+    print("=" * 60)
 
 if __name__ == "__main__":
-    check_and_execute()
+    main()
