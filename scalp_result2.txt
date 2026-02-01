@@ -1,0 +1,34 @@
+﻿======================================================================
+SCALPING STRATEGY BACKTEST
+======================================================================
+Settings:
+  Take Profit: +0.15 yen
+  Stop Loss:   -0.1 yen
+  Trade Hours: 10:00 - 18:00 JST
+  Units:       20,000
+
+----------------------------------------------------------------------
+RESULTS
+----------------------------------------------------------------------
+
+[5min_60days]
+  Period: 81 days
+  Trades: 462 (TP:101, SL:156, Forced:205)
+  Win Rate: 43.1%
+  Total P&L: -74,217 JPY
+  Final Capital: 925,783 JPY
+  ROI: -7.42%
+  Trades/Day: 5.7
+  Avg Hold: 48.8 min
+
+[1hour_2years]
+  Period: 730 days
+  Trades: 910 (TP:324, SL:348, Forced:238)
+  Win Rate: 50.9%
+  Total P&L: +204,622 JPY
+  Final Capital: 1,204,622 JPY
+  ROI: +20.46%
+  Trades/Day: 1.2
+  Avg Hold: 132.6 min
+
+======================================================================

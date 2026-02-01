@@ -166,7 +166,7 @@
     <div class="container">
         <div class="header-row">
             <h1>🏄 金利トレンド・サーフィン</h1>
-            <div class="strategy-badge">Interest Rate Trend Surfing | Ver 1.2.0</div>
+            <div class="strategy-badge">Interest Rate Trend Surfing | Ver 1.3.0</div>
         </div>
 
         <div class="grid">
@@ -266,6 +266,63 @@
             </thead>
             <tbody id="history"></tbody>
         </table>
+
+        <!-- デイトレ戦略セクション -->
+        <div id="daytradeSection" style="display:none; margin-top: 40px; padding-top: 30px; border-top: 2px solid #333;">
+            <h2 class="section-title">⚡ デイトレ戦略 (Day Trade)</h2>
+
+            <div class="grid">
+                <div class="card">
+                    <h3>残高</h3>
+                    <div class="value" id="dt_balance">--</div>
+                    <div class="sub">初期: <span id="dt_initial">--</span></div>
+                </div>
+                <div class="card">
+                    <h3>評価額</h3>
+                    <div class="value" id="dt_equity">--</div>
+                    <div class="sub">含み損益: <span id="dt_unrealized">--</span></div>
+                </div>
+                <div class="card">
+                    <h3>総損益</h3>
+                    <div class="value" id="dt_profit">--</div>
+                    <div class="sub">ROI: <span id="dt_roi">--</span></div>
+                </div>
+                <div class="card">
+                    <h3>設定</h3>
+                    <div class="value" id="dt_lot">--</div>
+                    <div class="sub">TP:<span id="dt_tp">--</span> / SL:<span id="dt_sl">--</span></div>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 20px;">📊 取引統計</h3>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="label">総取引数</div>
+                    <div class="val" id="dt_trades">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="label">勝率</div>
+                    <div class="val" id="dt_winrate">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="label">利確(TP)</div>
+                    <div class="val positive" id="dt_tp_count">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="label">損切(SL)</div>
+                    <div class="val negative" id="dt_sl_count">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="label">強制決済</div>
+                    <div class="val" id="dt_forced">--</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 20px;">📍 現在のポジション</h3>
+            <div id="dt_position" style="padding: 15px; background: #1a1a2e; border-radius: 8px;">
+                <span style="color: #666;">ポジションなし</span>
+            </div>
+        </div>
 
         <div class="last-update">最終更新: <span id="lastUpdate">--</span></div>
     </div>
@@ -461,10 +518,60 @@
             }
         }
 
+        // デイトレ戦略のデータ取得
+        async function loadDaytradeData() {
+            try {
+                const dt = await fetch('/api/daytrade/status').then(r => r.json());
+
+                if (!dt.exists) {
+                    document.getElementById('daytradeSection').style.display = 'none';
+                    return;
+                }
+
+                document.getElementById('daytradeSection').style.display = 'block';
+
+                document.getElementById('dt_balance').textContent = formatCurrency(dt.balance);
+                document.getElementById('dt_initial').textContent = formatCurrency(dt.initial_capital);
+                document.getElementById('dt_equity').textContent = formatCurrency(dt.equity);
+                document.getElementById('dt_unrealized').innerHTML = formatPnl(dt.unrealized_pnl);
+                document.getElementById('dt_profit').innerHTML = formatPnl(dt.total_profit);
+                document.getElementById('dt_roi').textContent = (dt.profit_rate >= 0 ? '+' : '') + dt.profit_rate.toFixed(2) + '%';
+                document.getElementById('dt_roi').className = dt.profit_rate > 0 ? 'positive' : dt.profit_rate < 0 ? 'negative' : '';
+
+                document.getElementById('dt_lot').textContent = (dt.settings.lot_ratio * 100).toFixed(0) + '%';
+                document.getElementById('dt_tp').textContent = '+' + dt.settings.take_profit + '円';
+                document.getElementById('dt_sl').textContent = '-' + dt.settings.stop_loss + '円';
+
+                document.getElementById('dt_trades').textContent = dt.stats.total_trades;
+                document.getElementById('dt_winrate').textContent = dt.stats.win_rate.toFixed(1) + '%';
+                document.getElementById('dt_tp_count').textContent = dt.stats.tp_count;
+                document.getElementById('dt_sl_count').textContent = dt.stats.sl_count;
+                document.getElementById('dt_forced').textContent = dt.stats.forced_count;
+
+                // ポジション表示
+                const posEl = document.getElementById('dt_position');
+                if (dt.position) {
+                    const p = dt.position;
+                    posEl.innerHTML = `
+                        <span class="badge buy">BUY</span>
+                        <strong>${p.units.toLocaleString()}</strong> 通貨 @ ${p.entry_price.toFixed(2)}
+                        → 含み損益: ${formatPnl(p.unrealized_pnl)}
+                    `;
+                } else {
+                    posEl.innerHTML = '<span style="color: #666;">ポジションなし</span>';
+                }
+
+            } catch (e) {
+                console.error('Error loading daytrade data:', e);
+            }
+        }
+
         // Initialize
         initCharts();
         loadData();
-        setInterval(loadData, 60000); // 1分ごとに更新
+        loadDaytradeData();
+        setInterval(loadData, 60000);
+        setInterval(loadDaytradeData, 60000);
     </script>
 </body>
 </html>
