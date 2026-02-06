@@ -293,6 +293,135 @@ def api_daytrade_history():
 
         return jsonify({"history": history})
 
+# ==========================================
+# 統合API（2つの財布ビュー用）
+# ==========================================
+
+@app.route('/api/wallets')
+def api_wallets():
+    """2つの戦略の財布サマリー"""
+    engine = get_engine()
+    with engine.connect() as conn:
+        wallets = []
+
+        # === スイング戦略 (WAIT) ===
+        result = conn.execute(text("SELECT initial_capital, current_balance FROM sim_config LIMIT 1"))
+        swing_config = result.fetchone()
+
+        if swing_config:
+            initial = float(swing_config[0])
+            balance = float(swing_config[1])
+
+            # ポジション集計
+            result = conn.execute(text("""
+                SELECT SUM(units), SUM(unrealized_pnl), SUM(swap_total),
+                       STRING_AGG(direction, ',')
+                FROM sim_positions WHERE status = 'OPEN'
+            """))
+            pos = result.fetchone()
+            total_units = pos[0] or 0
+            unrealized = float(pos[1] or 0) + float(pos[2] or 0)
+            direction = pos[3].split(',')[0] if pos[3] else None
+
+            equity = balance + unrealized
+            profit_rate = ((equity - initial) / initial) * 100
+
+            wallets.append({
+                "strategy": "WAIT",
+                "label": "🏄 スイング",
+                "initial_capital": initial,
+                "balance": balance,
+                "equity": equity,
+                "unrealized_pnl": unrealized,
+                "profit_rate": profit_rate,
+                "total_units": total_units,
+                "direction": direction
+            })
+
+        # === デイトレ戦略 ===
+        result = conn.execute(text("SELECT initial_capital, current_balance FROM sim_daytrade_config LIMIT 1"))
+        dt_config = result.fetchone()
+
+        if dt_config:
+            initial = float(dt_config[0])
+            balance = float(dt_config[1])
+
+            # ポジション
+            result = conn.execute(text("""
+                SELECT units, unrealized_pnl, direction
+                FROM sim_daytrade_positions WHERE status = 'OPEN' LIMIT 1
+            """))
+            pos = result.fetchone()
+            total_units = pos[0] if pos else 0
+            unrealized = float(pos[1]) if pos and pos[1] else 0
+            direction = pos[2] if pos else None
+
+            equity = balance + unrealized
+            profit_rate = ((equity - initial) / initial) * 100
+
+            wallets.append({
+                "strategy": "DAY",
+                "label": "⚡ デイトレ",
+                "initial_capital": initial,
+                "balance": balance,
+                "equity": equity,
+                "unrealized_pnl": unrealized,
+                "profit_rate": profit_rate,
+                "total_units": total_units,
+                "direction": direction
+            })
+
+        return jsonify({"wallets": wallets})
+
+@app.route('/api/history/combined')
+def api_history_combined():
+    """両戦略の取引履歴を統合"""
+    engine = get_engine()
+    with engine.connect() as conn:
+        combined = []
+
+        # スイング戦略の履歴
+        result = conn.execute(text("""
+            SELECT direction, entry_price, exit_price, units, net_pnl, exit_time
+            FROM sim_trade_history
+            ORDER BY exit_time DESC LIMIT 25
+        """))
+        for row in result:
+            combined.append({
+                "strategy": "WAIT",
+                "strategy_label": "🏄 WAIT",
+                "direction": row[0],
+                "entry_price": float(row[1]),
+                "exit_price": float(row[2]),
+                "units": row[3],
+                "pnl": float(row[4]) if row[4] else 0,
+                "exit_time": row[5].isoformat() if row[5] else None
+            })
+
+        # デイトレ戦略の履歴
+        result = conn.execute(text("""
+            SELECT direction, entry_price, exit_price, units, pnl, exit_time
+            FROM sim_daytrade_history
+            ORDER BY exit_time DESC LIMIT 25
+        """))
+        for row in result:
+            combined.append({
+                "strategy": "DAY",
+                "strategy_label": "⚡ DAY",
+                "direction": row[0],
+                "entry_price": float(row[1]),
+                "exit_price": float(row[2]),
+                "units": row[3],
+                "pnl": float(row[4]) if row[4] else 0,
+                "exit_time": row[5].isoformat() if row[5] else None
+            })
+
+        # 日時でソート
+        combined.sort(key=lambda x: x["exit_time"] or "", reverse=True)
+
+        return jsonify({"history": combined[:50]})
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
