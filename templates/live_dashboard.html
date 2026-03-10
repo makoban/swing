@@ -970,11 +970,11 @@ async function loadSimulation() {
         simGrid.innerHTML = '<div class="loading-text" style="grid-column:1/-1;">データ読み込み中...</div>';
     } else {
         const balance   = statusData.balance ?? 0;
-        const initial   = statusData.initial_balance ?? 1000000;
-        const roi       = statusData.roi_pct ?? 0;
-        const winRate   = statusData.win_rate_pct ?? 0;
-        const trades    = statusData.total_trades ?? 0;
-        const todayPnl  = statusData.today_pnl ?? 0;
+        const initial   = statusData.initial_capital ?? 1000000;
+        const roi       = statusData.profit_rate ?? 0;
+        const winRate   = statusData.stats?.win_rate ?? 0;
+        const trades    = statusData.stats?.total_trades ?? 0;
+        const todayPnl  = statusData.stats?.total_pnl ?? 0;
 
         simGrid.innerHTML = `
             <div class="card">
@@ -999,7 +999,8 @@ async function loadSimulation() {
             </div>`;
 
         // ポジション（シミュレーション）
-        const positions = statusData.positions || [];
+        const pos = statusData.position;
+        const positions = pos ? [pos] : [];
         if (positions.length === 0) {
             simPosCard.innerHTML = '<div class="no-position">現在保有ポジションはありません</div>';
         } else {
@@ -1035,15 +1036,15 @@ async function loadSimulation() {
     const histData  = await safeFetch('/api/daytrade/history');
     const simHistEl = document.getElementById('simHistoryContainer');
 
-    if (!histData || !histData.trades || histData.trades.length === 0) {
+    if (!histData || !histData.history || histData.history.length === 0) {
         simHistEl.innerHTML = '<div class="loading-text">取引履歴がありません</div>';
         return;
     }
 
     // 日付別にグルーピング
     const byDate = {};
-    for (const t of histData.trades) {
-        const dateKey = (t.closed_at || t.entry_time || '').substring(0, 10) || 'unknown';
+    for (const t of histData.history) {
+        const dateKey = (t.exit_time || '').substring(0, 10) || 'unknown';
         if (!byDate[dateKey]) byDate[dateKey] = [];
         byDate[dateKey].push(t);
     }
@@ -1051,21 +1052,23 @@ async function loadSimulation() {
     const datesDesc = Object.keys(byDate).sort((a, b) => b.localeCompare(a));
     const html = datesDesc.map((date, idx) => {
         const trades = byDate[date];
-        const dayPnl = trades.reduce((s, t) => s + (t.realized_pnl ?? 0), 0);
-        const wins   = trades.filter(t => (t.realized_pnl ?? 0) > 0).length;
-        const losses = trades.filter(t => (t.realized_pnl ?? 0) <= 0).length;
+        const dayPnl = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+        const wins   = trades.filter(t => (t.pnl ?? 0) > 0).length;
+        const losses = trades.filter(t => (t.pnl ?? 0) <= 0).length;
 
         const tradeRows = trades.map(t => {
             const dirCls = (t.direction || '').toUpperCase() === 'BUY' ? 'buy' : 'sell';
+            const actionTag = t.action ? `<span class="reason-tag">${t.action}</span>` : '';
             return `
             <div class="trade-row">
-                <span class="trade-time">${formatTime(t.closed_at || t.entry_time)}</span>
+                <span class="trade-time">${formatTime(t.exit_time)}</span>
                 <span><span class="direction-badge ${dirCls}" style="font-size:0.7rem;">${dirCls.toUpperCase()}</span></span>
                 <span class="trade-price">
                     ${t.entry_price ? Number(t.entry_price).toFixed(3) : '--'}
                     → ${t.exit_price ? Number(t.exit_price).toFixed(3) : '--'}
+                    <br>${actionTag}
                 </span>
-                <span class="trade-pnl">${formatPnl(t.realized_pnl)}</span>
+                <span class="trade-pnl">${formatPnl(t.pnl)}</span>
             </div>`;
         }).join('');
 
