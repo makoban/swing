@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, redirect
 from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
@@ -13,7 +13,7 @@ def get_engine():
 
 @app.route('/')
 def dashboard():
-    return render_template('dashboard.html')
+    return redirect('/live')
 
 @app.route('/api/status')
 def api_status():
